@@ -1,0 +1,34 @@
+# The Era of FullStack Security: The Collapse of Isolation Walls from V8 to Next.js
+
+**Author:** Shay Mordechai
+**Focus:** Vulnerability Research, Reverse Engineering, Browser Internals
+**Date:** December 24, 2025
+
+Every computer science student knows the world is traditionally divided into two paradigms: compilers and interpreters—or in web terms, "Frontend" and "Backend." However, in modern execution environments, this binary division has blurred into a complex gray area. If we summarize the security vulnerabilities of 2025, everything begins and ends with one concept: **Isolation**.
+
+## Physical Isolation: Code vs. Data
+In the traditional compiled world (like C/C++), there was a clear separation. Instructions are stored in the `.text` (Code) section with Execution privileges, while variables reside in the `.data` or `.bss` sections with strictly Write privileges. The operating system enforced role isolation—DATA could never become CODE. The isolation between data and code is physically maintained by the **NX (No Execute) bit**. 
+Due to the efficiency of compiled code, these languages became the backbone of Backend web servers.
+
+Conversely, traditional interpreters (like early JavaScript) offered portability and safety. Everything ran inside a protected "sandbox" where the script never interacted directly with the CPU. The browser engine (typically written in C++) reads a JS line, parses it into bytecode, and places it in RAM strictly as DATA, without execution privileges. The engine then maps this data to its own pre-compiled C++ functions and executes them via standard Syscalls. 
+In this model, the Frontend developer merely provides a script that enters the RAM as DATA. This offered flexibility, but at the cost of performance.
+
+## The V8 Revolution and the Breach of JIT Walls
+What happens when an interpreter gets tired of parsing and matching repetitive instructions to execute its own code? To cut down response times, it decides to execute instructions *directly* from the DATA section. 
+
+In 2008, Google was the first to implement this concept to drastically reduce browser latency, introducing the **V8 Engine**. V8 was built using **JIT (Just-In-Time) compilation** technology—a concept previously reserved for heavy compilers—bringing it directly into the interpreter. This architectural shift significantly expanded the attack surface of modern browsers. 
+
+The JIT compiler attaches to the interpreter, takes the JS script, and compiles it into native machine code on the fly. To do this, it allocates memory pages with **RWX (Read-Write-Execute)** permissions, entirely bypassing the NX flag mitigation.
+
+### Exploiting RWX: Hooking and CFI Bypasses
+**Because JIT engines require RWX memory pages to dynamically compile JavaScript into native machine code, they inherently break the W^X (Write XOR Execute) security mitigation. For a vulnerability researcher, this RWX region is a goldmine. It allows attackers to utilize *runtime code manipulation* and *inline hooking* (such as Detours) directly within the JIT process memory. By overwriting function pointers or compiled native instructions in these RWX pages, attackers can achieve full *CFI (Control Flow Integrity) bypass*, hijacking the execution flow without triggering traditional OS-level memory protections.**
+
+With the addition of numerous optimization tiers, the V8 engine became incredibly fast, but its codebase grew highly complex and prone to bugs (e.g., type confusion, out-of-bounds access).
+
+## React2Shell and the FullStack Security Era
+Today, because JIT allows Data to become Executable in real-time, modern architectures utilize the same language (JS/TS) on both the Frontend and the Backend (e.g., Next.js). This convenience recently cost the industry a new vulnerability—**React2Shell**—where threat actors exploited this dynamic execution to inject commands directly into the server.
+
+The industry's shift to XDR in 2020 wasn't just a technological change; it was a conceptual one. We realized that the isolation between the Web and the Endpoint is dead. As a security researcher, I believe the future belongs to those who know how to connect the dots—from the JavaScript execution in the Browser all the way down to the Instruction Pointer (EIP/RIP) in physical memory. This is true FullStack Security.
+
+---
+*P.S. As a private user, it is always nice to migrate to a more secure workspace. I use Fedora Kinoite OS, where sensitive system files are Immutable, and most applications run in isolated flatpak sandboxes. Regarding V8, while there are simpler alternatives, you can always sacrifice a bit of browser speed for security by entirely disabling JIT in your browser settings, allowing your OS to do what it was designed to do: protect your CPU.*
