@@ -1,0 +1,24 @@
+# Investigating IPC Boundaries and Sandboxing in Flatpak: The KeePassXC & LibreWolf Case
+
+## 1. Theoretical Background
+Modern Linux systems increasingly rely on containerized application formats like Flatpak to enhance security. Flatpak uses features like namespaces and `bubblewrap` to isolate applications into separate sandboxes. 
+
+However, this strict isolation breaks traditional Inter-Process Communication (IPC). Many applications rely on IPC to function together. For example:
+* **Password Managers (KeePassXC):** Need to communicate with browser extensions via Native Messaging.
+* **Hardware Security Keys (USB/YubiKey):** Browsers need access to `/dev/bus/usb/` or local PC/SC daemons to authenticate.
+
+These communications often happen over **Unix Domain Sockets** — local data channels represented as files in the filesystem (usually under `/run/user/`). When two applications run in separate Flatpak sandboxes, they cannot see or access each other's sockets by default.
+
+## 2. The Investigation: Locating the IPC Socket
+To understand why the LibreWolf browser extension cannot communicate with the KeePassXC desktop app, we first need to locate the communication channel (the Unix Domain Socket).
+
+Flatpak applications store their runtime data in isolated directories under `/run/user/1000/app/`. By inspecting the KeePassXC directory on the host, we can identify the active socket:
+
+```bash
+shay0129@fedora:~$ ls -l /run/user/1000/app/org.keepassxc.KeePassXC/
+srwx------. 1 shay0129 shay0129 0 Mar 28 21:21 org.keepassxc.KeePassXC.BrowserServer
+```
+*(Note the `s` at the beginning of the permissions string, indicating it is a Socket file).*
+
+## 3. Proving the Sandbox Isolation (הוכחת הבידוד)
+To verify that this is a sandbox boundary issue, we must simulate the browser's perspective. We can inject a command into the LibreWolf sandbox to see if it can access the KeePassXC socket:
