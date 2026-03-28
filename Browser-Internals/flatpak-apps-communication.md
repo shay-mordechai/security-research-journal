@@ -20,5 +20,26 @@ srwx------. 1 shay0129 shay0129 0 Mar 28 21:21 org.keepassxc.KeePassXC.BrowserSe
 ```
 *(Note the `s` at the beginning of the permissions string, indicating it is a Socket file).*
 
-## 3. Proving the Sandbox Isolation (הוכחת הבידוד)
-To verify that this is a sandbox boundary issue, we must simulate the browser's perspective. We can inject a command into the LibreWolf sandbox to see if it can access the KeePassXC socket:
+## 3. Proving the Sandbox Isolation
+To verify that this is a sandbox boundary issue, we must simulate the browser's perspective. We can inject an `ls` command directly into the LibreWolf sandbox to see if it can access the KeePassXC socket:
+
+```bash
+shay0129@fedora:~$ flatpak run --command=ls io.gitlab.librewolf-community -l /run/user/1000/app/org.keepassxc.KeePassXC/
+F: Not sharing "/dev/bus/usb" with sandbox: Path "/dev" is reserved by Flatpak
+ls: cannot access '/run/user/1000/app/org.keepassxc.KeePassXC/': No such file or directory
+```
+
+### Findings
+This output perfectly demonstrates two critical isolation mechanisms enforced by Flatpak:
+1. **Mount Namespaces (IPC Blocked):** The sandbox receives a completely isolated view of the filesystem. It does not get a "Permission Denied" error; rather, the host directory simply does not exist within its namespace. This breaks the Unix Domain Socket communication required by the Native Messaging host.
+2. **Device Isolation (Hardware Blocked):** The warning `Not sharing "/dev/bus/usb"` highlights that raw hardware access is restricted, which actively breaks authentication mechanisms like hardware Security USB keys.
+
+## 4. Architectural Solutions
+To resolve these isolation barriers without compromising the entire sandbox, granular permissions must be applied:
+
+* **Solving the IPC (KeePassXC) Issue:** We can punch a specific hole in the filesystem boundary using a Flatpak override. This allows the browser to map the specific socket path into its namespace:
+  `flatpak override --user --filesystem=/run/user/1000/app/org.keepassxc.KeePassXC io.gitlab.librewolf-community`
+* **Solving the Hardware (USB Key) Issue:** We can grant the browser explicit access to the host's devices or the PC/SC smartcard daemon:
+  `flatpak override --user --device=all io.gitlab.librewolf-community`
+```
+האם תרצה שניפגש פה מחר בבוקר כדי לבצע את הפקודות של ה-Override (כדי לראות שזה באמת פותר את הבעיה) ונתחיל את סימולציית הראיון?
