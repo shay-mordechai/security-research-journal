@@ -48,3 +48,15 @@ shay0129@fedora:~$ flatpak override --user --socket=pcsc io.gitlab.librewolf-com
 ```
 
 By allowing access to the PC/SC socket, the browser can securely validate identity (WebAuthn/FIDO2) through the hardware key without touching the raw `/dev/` filesystem layer. To verify all sockets exposed to the sandbox, we can read the kernel's routing table from within the container using `cat /proc/net/unix`.
+
+## 6. Comparative Attack Surface Analysis: LibreWolf vs. Chrome & Brave
+To contextualize the security posture of LibreWolf, a comparative analysis of Flatpak permissions (`flatpak info --show-permissions`) was conducted against Google Chrome and Brave Browser. The goal was to assess the potential impact of a Remote Code Execution (RCE) vulnerability inside the browser sandbox.
+
+### Findings:
+1. **Google Chrome (Data Exposure):**
+   Chrome defaults request extensive filesystem access (`xdg-music;xdg-pictures;xdg-videos;xdg-documents`). In the event of an RCE, the attacker gains immediate read/write access to the user's personal files.
+2. **Brave Browser (System Integration Risk):**
+   Brave requests write access to host application directories (`~/.local/share/applications:create;~/.local/share/icons:create`) and exposes a massive DBus Session Bus surface (including local wallets like `kwalletd6` and screen savers). This increases the risk of persistent host compromise via malicious desktop entries or IPC manipulation.
+3. **LibreWolf (Strict Least Privilege):**
+   LibreWolf proved to be the most isolated environment. By default, it restricts filesystem access solely to `xdg-download` and severely limits the DBus surface. 
+By utilizing LibreWolf and explicitly engineering granular overrides for necessary identity services (KeePassXC IPC and PC/SC smartcard sockets), we achieve a functional browsing environment that strictly adheres to the principle of least privilege.
