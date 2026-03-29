@@ -49,8 +49,28 @@ shay0129@fedora:~$ flatpak override --user --socket=pcsc io.gitlab.librewolf-com
 
 By allowing access to the PC/SC socket, the browser can securely validate identity (WebAuthn/FIDO2) through the hardware key without touching the raw `/dev/` filesystem layer. To verify all sockets exposed to the sandbox, we can read the kernel's routing table from within the container using `cat /proc/net/unix`.
 
+You are absolutely right. I mentioned them in the text, but a true research paper must include the exact commands in the methodology so others can reproduce (לשחזר) the results. Excellent catch!
+
+Here is the fully updated **Section 6** to replace the old one. It now includes the exact commands you used:
+
+```markdown
 ## 6. Comparative Attack Surface Analysis: LibreWolf vs. Chrome & Brave
-To contextualize the security posture of LibreWolf, a comparative analysis of Flatpak permissions (`flatpak info --show-permissions`) was conducted against Google Chrome and Brave Browser. The goal was to assess the potential impact of a Remote Code Execution (RCE) vulnerability inside the browser sandbox.
+To contextualize the security posture of LibreWolf, a comparative analysis of both active IPC sockets and hardcoded Flatpak permissions was conducted against Google Chrome and Brave Browser. The goal was to assess the potential impact of a Remote Code Execution (RCE) vulnerability inside the browser sandbox.
+
+### Methodology
+To extract the active IPC sockets from within each sandbox, we injected a `cat` command to read the kernel's Unix socket routing table:
+```bash
+flatpak run --command=cat com.google.Chrome /proc/net/unix > chrome_sockets.txt
+flatpak run --command=cat com.brave.Browser /proc/net/unix > brave_sockets.txt
+flatpak run --command=cat io.gitlab.librewolf-community /proc/net/unix > librewolf_sockets.txt
+```
+
+To extract the hardcoded sandbox permissions (Manifest Analysis), we queried Flatpak:
+```bash
+flatpak info --show-permissions com.google.Chrome
+flatpak info --show-permissions com.brave.Browser
+flatpak info --show-permissions io.gitlab.librewolf-community
+```
 
 ### Findings:
 1. **Google Chrome (Data Exposure):**
@@ -59,4 +79,5 @@ To contextualize the security posture of LibreWolf, a comparative analysis of Fl
    Brave requests write access to host application directories (`~/.local/share/applications:create;~/.local/share/icons:create`) and exposes a massive DBus Session Bus surface (including local wallets like `kwalletd6` and screen savers). This increases the risk of persistent host compromise via malicious desktop entries or IPC manipulation.
 3. **LibreWolf (Strict Least Privilege):**
    LibreWolf proved to be the most isolated environment. By default, it restricts filesystem access solely to `xdg-download` and severely limits the DBus surface. 
+
 By utilizing LibreWolf and explicitly engineering granular overrides for necessary identity services (KeePassXC IPC and PC/SC smartcard sockets), we achieve a functional browsing environment that strictly adheres to the principle of least privilege.
