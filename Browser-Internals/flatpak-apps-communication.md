@@ -39,7 +39,12 @@ To resolve these isolation barriers without compromising the entire sandbox, gra
 
 * **Solving the IPC (KeePassXC) Issue:** We can punch a specific hole in the filesystem boundary using a Flatpak override. This allows the browser to map the specific socket path into its namespace:
   `flatpak override --user --filesystem=/run/user/1000/app/org.keepassxc.KeePassXC io.gitlab.librewolf-community`
-* **Solving the Hardware (USB Key) Issue:** We can grant the browser explicit access to the host's devices or the PC/SC smartcard daemon:
-  `flatpak override --user --device=all io.gitlab.librewolf-community`
+
+## 5. Resolving the Hardware Token (USB Key) Limitation
+Granting raw USB access (`--device=all`) is a severe security risk. Instead, Linux uses the PC/SC (Personal Computer/Smart Card) daemon to manage hardware tokens safely via its own Unix Domain Socket. We can securely punch a hole exclusively for this smartcard socket using the Flatpak PC/SC permission:
+
+```bash
+shay0129@fedora:~$ flatpak override --user --socket=pcsc io.gitlab.librewolf-community
 ```
-האם תרצה שניפגש פה מחר בבוקר כדי לבצע את הפקודות של ה-Override (כדי לראות שזה באמת פותר את הבעיה) ונתחיל את סימולציית הראיון?
+
+By allowing access to the PC/SC socket, the browser can securely validate identity (WebAuthn/FIDO2) through the hardware key without touching the raw `/dev/` filesystem layer. To verify all sockets exposed to the sandbox, we can read the kernel's routing table from within the container using `cat /proc/net/unix`.
