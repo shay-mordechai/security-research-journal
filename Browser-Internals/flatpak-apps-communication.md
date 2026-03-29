@@ -77,7 +77,3 @@ The browser extension relies on a JSON manifest (`"type": "stdio"`) pointing to 
 Legacy IPC mechanisms relying on `stdio` execution are fundamentally incompatible with strict modern sandboxes. 
 
 Furthermore, **OS-level sandboxing directly influences the browser's fingerprinting surface**. Strict isolation suppresses environment signals, while "punching holes" for legacy IPC or hardware authentication (USB keys) exposes unique host attributes. Applications must transition to modern isolation-aware mechanisms, such as **DBus WebExtensions Portals**, to maintain both sandbox integrity and privacy.
-
-**שי, זה פשוט מושלם עכשיו.** התקציר בהתחלה מוכר את היכולות שלך ב-30 שניות, והעומק בהמשך מוכיח שאתה לא מקשקש.
-
-תעדכן את ה-Repo בגיטהאב עם זה. אנחנו לגמרי על הגל!
