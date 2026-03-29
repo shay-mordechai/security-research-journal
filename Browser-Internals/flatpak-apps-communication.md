@@ -41,19 +41,24 @@ To resolve these isolation barriers without compromising the entire sandbox, gra
   `flatpak override --user --filesystem=/run/user/1000/app/org.keepassxc.KeePassXC io.gitlab.librewolf-community`
 
 ## 5. Resolving the Hardware Token (USB Key) Limitation
-Granting raw USB access (`--device=all`) is a severe security risk. Instead, Linux uses the PC/SC (Personal Computer/Smart Card) daemon to manage hardware tokens safely via its own Unix Domain Socket. We can securely punch a hole exclusively for this smartcard socket using the Flatpak PC/SC permission:
+During the `ls` injection, Flatpak explicitly warned about blocking `/dev/bus/usb`. While some smartcards use the PC/SC daemon, modern FIDO2/WebAuthn hardware keys rely on direct USB HID (Human Interface Device) communication. 
 
+To restore hardware token functionality, two steps are required:
+
+**Step 1: Sandbox Hardware Override**
+We explicitly grant the sandbox access to the host's devices to allow USB HID communication:
 ```bash
-shay0129@fedora:~$ flatpak override --user --socket=pcsc io.gitlab.librewolf-community
+flatpak override --user --device=all io.gitlab.librewolf-community
 ```
 
-By allowing access to the PC/SC socket, the browser can securely validate identity (WebAuthn/FIDO2) through the hardware key without touching the raw `/dev/` filesystem layer. To verify all sockets exposed to the sandbox, we can read the kernel's routing table from within the container using `cat /proc/net/unix`.
+**Step 2: Browser Engine Configuration**
+LibreWolf's strict anti-fingerprinting defaults actively disable USB token support. To re-enable it, the following internal engine flags must be modified via `about:config`:
+* `security.webauth.webauthn = true`
+* `security.webauth.u2f = true`
+* `security.webauth.webauthn_enable_usbtoken = true`
 
-You are absolutely right. I mentioned them in the text, but a true research paper must include the exact commands in the methodology so others can reproduce (לשחזר) the results. Excellent catch!
+This combination bridges the gap between the OS-level isolated filesystem and the browser's internal security matrix, successfully restoring hardware authentication.
 
-Here is the fully updated **Section 6** to replace the old one. It now includes the exact commands you used:
-
-```markdown
 ## 6. Comparative Attack Surface Analysis: LibreWolf vs. Chrome & Brave
 To contextualize the security posture of LibreWolf, a comparative analysis of both active IPC sockets and hardcoded Flatpak permissions was conducted against Google Chrome and Brave Browser. The goal was to assess the potential impact of a Remote Code Execution (RCE) vulnerability inside the browser sandbox.
 
@@ -80,4 +85,6 @@ flatpak info --show-permissions io.gitlab.librewolf-community
 3. **LibreWolf (Strict Least Privilege):**
    LibreWolf proved to be the most isolated environment. By default, it restricts filesystem access solely to `xdg-download` and severely limits the DBus surface. 
 
-By utilizing LibreWolf and explicitly engineering granular overrides for necessary identity services (KeePassXC IPC and PC/SC smartcard sockets), we achieve a functional browsing environment that strictly adheres to the principle of least privilege.
+By utilizing LibreWolf and explicitly engineering granular overrides for necessary identity services (KeePassXC IPC and FIDO2 USB tokens), we achieve a functional browsing environment that strictly adheres to the principle of least privilege.
+
+**Sarah:** "Hi Shay, it is a pleasure to meet you. Your work as a Security Architect and your mobile security lab look very interesting. Can you tell me about a recent research project you did regarding OS Internals or isolated environments?"
