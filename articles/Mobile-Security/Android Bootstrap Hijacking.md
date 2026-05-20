@@ -1,0 +1,344 @@
+# Android Bootstrap Hijacking - How Malware Executes Before the UI Exists
+
+**הקדמה:**
+
+הרבה מאוד משתמשי אנדרואיד (ואפילו מפתחים) לא מודעים לנתון הבא:
+
+"עולם האנדרואיד" כפי שאנחנו מכירים אותו, לא באמת קיים ברגע שהמכשיר נדלק. בשניות הראשונות, הטלפון שלכם פשוט פלטפורמת Linux רגילה לחלוטין.
+
+המאמר מתמקד בשבריר השניה שלאחר ריצת האפליקצייה על מכשיר האנדרואיד, וכיצד נוזקות מתקדמות (כמו Anatsa) מנסות "לעצור את הזמן" ולהידמות למערכת ההפעלה בעצמה, עוד לפני שהמשתמש רואה מסך כלשהו.
+
+> [!QUOTE] Summary
+> 
+> Plaintext
+> 
+> ```
+[ Process-Wide Bootstrap Phase ]
+>1. fork() -> הולדת התהליך ברמת הלינוקס מתוך ה-Zygote
+>2. ActivityThread.main() -> הקמת ה-Looper הראשי בתוך התהליך
+>3. AMS sends bindApplication -> פקודת האתחול הגלובלית מה-System Server
+>4. newApplication() -> יצירת אובייקט ה-Application ע"י המערכת (Reflection)
+>5. attachBaseContext() -> [נקודת המחטף של Anatsa! פה ה-Stub מפענח את ה-DEX ב-RAM]
+>6. Application.onCreate() -> [העברת הלפיד ל-OEP הזדוני בזיכרון]
+>   
+[ User Interface Phase ]
+>7. MainActivity.onCreate() -> [ה-Entry Point המקורית של האפליקציה הלגיטימית]
+>8. onResume() -> ה-WindowManager מצייר את הפיקסלים בפעם הראשונה על המסך
+
+
+## חלק א': המירוץ מתחיל (ה-Boot וה-Zygote)
+
+כאשר משתמש מריץ אפליקציה לגיטימית, התהליכים נראים כך:
+
+> [!QUOTE] The Processes Map Hierarchy
+> 
+> Plaintext
+>```
+>
+>Linux Kernel
+   │
+   └── init (PID 1)
+>        │
+>        ....
+>        │
+>        └── Zygote
+>              │
+>              ├── System Server (Zygote Fork)
+>              │      ├── ActivityManagerService (AMS)
+>              │      └── PackageManagerService (PMS)
+>              │
+>              │
+>              └── App Process (Zygote Fork)
+>                     │
+>                     └── ActivityThread
+>                            └── Main / UI Thread
+>                                   └── Looper
+>```                                   
+
+זיגוט, הוא בעצם טמפלט נקי של הבסיס עבור כל אפליקציית אנדרואיד.
+כדי להכין את הקרקע, תהליך ה-Zygote מאתחל 3 רכיבים בסיסיים:
+- **Android Runtime (ART):** ה-VM שמסוגל לקרוא ולהריץ קוד Java/Kotlin (קבצי DEX).
+- **Android Framework:** טעינה מראש של אלפי מחלקות ומשאבי מערכת אל הזיכרון.
+- **סוקט מקומי:** ערוץ תקשורת שמאזין לבקשות fork שמגיעות מהמנהל הראשי -System Server. זיגוט יוצר אותו לפני ש-System Server נולד.
+    
+#### הפיצול (The Fork)
+
+במהלך הBoot, מתבצע fork ראשון שיוזם זיגוט. נוצר תהליך בן שירש את ה-ART, את Framework, (ובלית ברירה) את הסוקט.
+
+מתכנתי קוד המקור של אנדרואיד, הזדרזו לסגור את הסוקט מטעמי אבטחה (כמו שרואים בפקודה הבאה)
+
+
+```Java
+Zygote.closeAllFilesExcept(managedFileDescriptors);
+```
+
+הfork נולד עם "מחרוזת" בזכרון, שתשמש אותו כדי להריץ את ה"יעוד" שלו בעזרת פונקציות בזמן ריצה (Reflection).
+
+מי שאחראי לכך שהFork הראשון יווצר עם המחרוזת "SystemServer.main()", זהו הinit (בכבודו ובעצמו). הוא מעביר אותה כחלק מיצירת Zygote עם דגל --start-system-server חד פעמי, (לחסכון בזמן). כך Zygote מחזיק בזכרון את המחרוזת ומיד משכפל את עצמו.
+
+בהמשך, כש-System Server יתקיים ויגיד לZygote שצריך Fork חדש, הוא זה שיקבל את המחרוזת מהLauncher, ויעביר אותה לZygote דרך הLocal Socket.
+
+מעתה והלאה, זיגוט עובר למצב האזנה (בסוקט שפתח), ומי שאחראי "להעיר" אותו וליזום Zygote Forks, זה רק המנהל - System Server.
+
+---
+## חלק ב': חלוקת התפקידים (העץ הארכיטקטוני, System Server מול App Process, מנגנוני ה-Socket וה-Binder).
+
+**תהליך System Server:**
+
+הפונקציה SystemServer.main(), היא זו שמקימה את שירותי הניהול של ה-OS, כמו ה-AMS (ניהול פעילויות) וה-PMS.
+
+ברגע שSYSTEM SERVER נולד (במהלך הBOOT), דבר ראשון שהוא עושה זה להריץ את הMAIN שלו. ברגע שנוצר לו PMS, הPMS סורק את כל קבצי הManifests שיש במכשיר (בפועל, סורק קובץ כללי אחד - כחלק מאופטימיזציה), ומעדכן טבלה פנימית שמגדירה הרשאות ושירותים לכל אפליקציה.
+
+מאוחר יותר, אפליקציית ה-Launcher רק מתשאלת את ה-PMS, כדי לקבל את האייקון והשם (Label) ולהציג אותם במסך הבית (כפי שנראה בחלק ג', בקטע הקוד הראשון).
+
+**תהליך אפליקציה (App Process):**
+
+נוצר בכל פעם שהמשתמש לוחץ על Launcher של אפליקציה.
+
+ה-System Server שולח פקודה ל-Zygote דרך ה-Socket: "תשכפל פרוסס חדש". התהליך החדש שנוצר, משתמש ב-Reflection כדי להריץ את ActivityThread.main(), שמפעיל את ה-Looper (נראה בהמשך) ומכין את ה-UI Thread לקבלת הודעות מSystem Server.
+
+ברגע שהאפליקציה חיה ונושמת, ה-Zygote מסיים את תפקידו וחוזר לישון. מעתה והלאה, התקשורת השוטפת מתבצעת ישירות בין ה-ActivityThread לבין ה-System Server (AMS) באמצעות מנגנון ה-IPC הראשי של אנדרואיד - Binder IPC.
+
+### **מנגנוני ה-Socket וה-Binder**
+
+נמצאנו למדים, שיש לSystem Server שלושה תפקידים עיקריים:
+
+- לבקש בעצמו Zygote Forks (טמפלט) עבור אפליקציות חדשות.
+    
+- לתקשר עם האפליקצייה שנוצרה, באמצעות AMS.
+    
+- לסרוק AndroidManifest.xml במהלך הBoot או התקנת האפליקצייה, באמצעות PMS.
+    
+
+אך כאן עולה שאלה מעניינת: למה המערכת צריכה שני מנגנוני תקשורת (IPC) שונים? בדומה למודלים של IPC בין דפדפן ליישומים בלינוקס, גם כאן התקשורת לא מתבצעת ישירות.
+
+- **בשלב ההקמה (הסוקט):** ה-System Server משתמש ב-Local Socket מול Zygote. זהו צינור מהיר ופשוט שנועד למטרה אחת בלבד - להעיר את זיגוט ולהגיד לו לבצע שכפול.
+    
+- **בשלב הריצה (ה-Binder):** בו עוברת התקשורת בין הAMS לבין ActivityThread.
+    
+
+**מנוע החיים של התהליך: ה-Looper**
+
+כאשר האפליקציה "נולדת", ה-Zygote משכפל את עצמו לפרוסס חדש (Zygote Fork) שיש בו רק Thread אחד ראשי - ה-Main / UI Thread.
+
+בפועל, כל מה שאנחנו קוראים לו 'האפליקציה' יושב על לולאה אחת (Looper) שחיה בתוך ה-UI Thread, שמנוהלת ע״י ActivityThread.
+
+בלי הלולאה הזו, ה-Thread הראשי היה מסיים את פונקציית ה-main שלו והפרוסס היה נסגר מיד.
+
+כבר הזכרנו שהSystem Server כבר מחזיק בזכרון שלו את הרשאות האפליקצייה, וביניהם את ה-Entry Point של האפליקצייה.
+
+בזמן הריצה, ה-System Server שולח פקודות הרצה (כמו onCreate, onStart וכו') כדי להניע את ה-EntryPoint. הפקודות האלו נשלחות מה-System Server דרך ה-Binder IPC, ומתורגמות להודעות בתוך תור ההודעות של האפליקציה.
+
+ה-UI Thread מצידו לא נחנק - הוא יושב בתוך לולאת ה-Looper האינסופית, שולף את הפקודות האלו מהתור אחת אחת בעזרת המתווך שלו, ומריץ את פונקציות האפליקצייה בזו אחר זו.
+
+---
+## חלק ג': נקודת המחטף (איך הנוזקה Anatsa מנצלת את ה-bindApplication כדי להקדים את ה-UI).
+
+עד פה, זו ההבנה שהיתה לי מחקירת הAPK של OWASP LEVEL2. שם ה-Manifest.xml עבד "לפי הספר".
+
+כשהגעתי לחקור את הנוזקה Anatsa (מסוג Banker), ראיתי שהManifest שלה נראה אחרת לגמרי.
+
+### Application vs. Activity: שתי נקודות הכניסה
+
+באנדרואיד, אין רק "נקודת כניסה" אחת. יש למעשה שתי רמות שונות של הרצת קוד שרצות זו אחר זו - "תהליך" "וחלון".
+
+הזכרנו שSystem Server אחראי לשלוח פקודות לLOOPER.
+
+יש פקודה אחת שמתרחשת בתחילת הרצת האפליקצייה, והיא מושפעת ממה שכתוב (או לא כתוב) בManifest.
+
+הפקודה הראשונה של הAMS נקראת bindApplication. היא הטריגר שגורם למערכת ההפעלה ליצור את אובייקט ה-Application (כפי שנראה בהמשך). היא מתרחשת עוד לפני שהאפליקצייה מריצה UI.
+
+**ניתוח AndroidManifest.xml של Level 2**
+
+בManifest הבא, אין מאפיין ששייך לשלב ה bindApplication, לכן הApplication יהיה ברירת מחדל, ואליו יתווספו מאפיינים גלובליים לאפליקצייה.
+
+
+```XML
+<application
+    android:theme="@style/AppTheme"
+    android:label="@string/app_name"
+    android:icon="@mipmap/ic_launcher"
+    android:allowBackup="true"
+    android:supportsRtl="true">
+```
+
+אובייקט Activity:
+
+שייך לפקודת OnCreate, שנשלחת לLooper מיד אחרי bindApplication.
+
+כאן מוגדר הEntryPoint של מסך הUI (רגע לפני הציור על המסך ב onResume).
+```XML
+    <activity android:name="sg.vantagepoint.uncrackable2.MainActivity">
+        <intent-filter>
+            <action android:name="android.intent.action.MAIN"/>
+            <category android:name="android.intent.category.LAUNCHER"/>
+        </intent-filter>
+    </activity>
+</application>
+```
+
+
+**ניתוח הManifest.xml של הנוזקה:**
+
+
+```XML
+<application
+    android:label="PDF Reader: Update"
+    android:icon="@vista6/vista_res_0x7f060000"
+    android:name="ihp.opjhprs.fsthjpoyr.rhhkkff"
+    android:allowBackup="true"
+    android:usesCleartextTraffic="true">
+```
+
+כאן יש תכונה שמשפיעה מאוד על שלב הbindapplication.
+
+התכונה android:name, גורמת למערכת ההפעלה ליצור אובייקט Application מותאם אישית, ולא ברירת המחדל שראינו ב Uncrackable.
+
+בעצם הוגדר Entry Point מוקדם מאוד ברמת הProcess, לפני הEntry Point של הUI.
+
+אם הקוד בשלב זה יכיל פעולות ארוכות, ה-UI Thread ייתקע, והמשתמש יראה מסך שחור וימחק את האפליקציה. לכן, הקוד ב-Entry Point הזה חייב להיות קצר וקטלני.
+
+להלן חלק מקוד הEntry Point הידני שמצאנו:
+
+
+```Java
+/* JADX INFO: compiled from: StubApp.java */  
+/* JADX INFO: loaded from: classes.dex */  
+public class rhhkkff extends Application {  
+    @Override // android.content.ContextWrapper  
+    protected void attachBaseContext(Context base) {  
+        super.attachBaseContext(base);  
+        new eomqmgsskufu(base).oqwrkywwlykpu();  
+        new tttlkqttg(base).mopksfpffv();  
+        kjyylrrmxujekkg.wqlx(this, qhpsx.noxgiqtlgxejjlkguiqsl, qhpsx.pmoerwxrnviwturjgmsrs);  
+    }
+```
+
+הניתוח הסטטי כאן מוגבל, כי הוא עבר Obfuscation רציני.
+
+מה שכן אפשר לראות כאן מיד, שהקלאס הזה הוא מסוג Stub Unpacking (לפי השם בשורה הראשונה).
+
+ה-stub Unpacking עובד בשלושה שלבים מרכזיים:
+
+1. טעינת קובץ המקור לזיכרון.
+    
+2. שילוב המחלקות הזדוניות אל תוך סביבת הריצה של האפליקציה.
+    
+3. העברת שליטה ל-Entry Point של התוכנית המקורית.
+    
+
+הקוד להלן, מבצע בדיוק את השלבים האלה (נשאיר לDynamic Analysis עם Frida).
+
+**וידוי:**
+
+ברגע הראשון שהסתכלתי על הקוד, לא הבנתי מי מריץ אותו. הוא נראה כמו 4 פונקציות "באוויר", בלי שאף main קורא להן!
+
+ההסבר ל"מי מריץ את הקלאס הזה", דורש מאיתנו לחזור קצת אחורה, לשלב יצירת אובייקט ה-Application בפקודת bindApplication (ששולח AMS).
+
+באנדרואיד בשונה מJAVA רגילה, ברגע שהגדרתי Entry Point (בApplication/Activity), הקלאס הזה ירוץ מיד גם בלי שנראה מישהו ש"קורא לו", בגלל קוד במערכת הפעלה שגורם לו לרוץ בתור אובייקט Application (להלן דוגמא).
+
+
+```Java
+public Application newApplication(ClassLoader cl, String className, Context context) {
+    return (Application) cl.loadClass(className).newInstance();
+}
+// -----------------------------------------------------------------
+public Activity newActivity(ClassLoader cl, String className, Intent intent) {
+    return (Activity) cl.loadClass(className).newInstance();
+}
+```
+
+הנוזקה הגדירה קלאס בתור Entry Point ידנית, לכן הוא יתלבש על האובייקט Application.
+
+כעת אפשר להבין, שהקלאס שהוגדר כ-Process Entry Point באובייקט הApplication, בעצם מורץ בדרך הבאה, וכל זה באמצעות הקוד של מערכת ההפעלה, שמשתמש בReflection.
+
+הדגמת "הלבשה" ידנית של פונקציות על גבי אובייקט הApplication בתהליך אתחול הProcess:
+
+
+```Java
+Application.attachBaseContext(...)
+Application.onCreate()
+Application.createPackageContext(...)
+Application.getPackageName()
+```
+
+---
+## חלק ד': אתגר הניתוח הדינמי – המירוץ נגד השעון
+
+לאחר שהבנו שהנוזקה חוטפת את שלב ה-Bootstrap ורצה בתוך attachBaseContext(), עולה שאלה קריטית: איך בכלל אפשר לנתח אותה בזמן אמת? כאן נכנס לתמונה כלי ה-Dynamic Binary Instrumentation המוביל בתעשייה – Frida. הבעיה היא שהארכיטקטורה של הנוזקה, דורשת מאיתנו לשנות את הדרך שבה אנחנו משתמשים עם Frida.
+
+### 1. הגישה הרגילה והמכשול שלה: חיבור מאוחר (Attach)
+
+במצב הרגיל (Attach), אנחנו מנסים להתחבר לאפליקציה אחרי שהיא כבר הופיעה על המסך (בשלב ה-UI).
+
+ההתחברות היא אחרי שהתחיל הEntry Point עם אובייקט הActivity.
+
+פרידה אומרת לקרנל: "עצור את ה-Threads של האפליקציה", מזריקה את סוכן הניטור שלה (Frida Agent), ומשחררת את הריצה.
+
+זה כבר מאוחר מידיי, כי ה-attachBaseContext() של הנוזקה רץ כבר עם אובייקט הApplication.
+
+### 2. הדרך לנצח את המירוץ Spawn:
+
+מכיוון שאין לנו שום יכולת אנושית (או טכנית במצב Attach) להיות מהירים יותר מפקודות ה-Bootstrap של ה-System Server, הדרך לנצח היא להקדים את טעינת האפליקציה בעזרת מצב Spawn.
+
+במצב Spawn, האפליקציה מופעלת כרגיל (מה שגורם ל-System Server לבקש Fork מ-Zygote), אך Frida מתערבת מיד לאחר הFork. היא תופסת את התהליך החדש ומעבירה אותו למצב השהייה, לפני שהפקודה הראשונה של ה-ActivityThread מתחילה לרוץ (לפני Process Entry Point).
+
+כך, כשהנוזקה תגיע ל-attachBaseContext(), אנחנו כבר נהיה שם בפנים כדי לתפוס אותה.
+
+### 3. שבירת חוקי המשחק: Zygote Hook
+
+במקרים קיצוניים של נוזקות מתקדמות (או הגנות Anti-Analysis חזקות), ניתן להשתמש בשיטה האגרסיבית ביותר: Zygote Hook. במקום להמתין ליצירת תהליך האפליקציה, Frida מזריקה את עצמה ישירות לתוך תהליך ה-Zygote המקורי עצמו. המשמעות היא שכל אפליקציה עתידית שתרוץ במכשיר, תשתכפל ותיוולד עם Frida Agent "בדם", עוד לפני ה-Fork.
+
+---
+
+הHOOK במילים:
+נניח שהHook שלי מתחיל לרוץ מיד אחרי הFork, מה הוא רואה? שעוד מעט מתחילה קריאת הManifest והולך להיווצר אובייקט Application - שם נעצור אותו.
+- תופס את מי שקרא ליצירת Application חדש.
+- גורם לו ליצור אובייקט נקי, ללא תלות בקוד האפליקצייה.
+- יוצר Application נקי.
+
+```JavaScript
+Java.perform(function() {
+
+	var reset_entry_point = Java.use("android.app.LoadedApk");
+	
+	reset_entry_point.makeApplicationInner.implementation = function(forceDefaultAppClass, instrumentation, allowDuplicateInstances) {
+	
+	forceDefaultAppClass = true;
+	
+	return this.makeApplicationInner(forceDefaultAppClass, instrumentation, allowDuplicateInstances);
+};
+```
+
+זיהיתי שהפונקצייה `makeApplicationInner`, היא זו שקוראת ליצירת האובייקט (`newApplication`).
+היא מבצעת בדיקה של הפרמטר הראשון הבוליאני.
+```Java
+if (forceDefaultAppClass || (appClass == null)) {
+	appClass = "android.app.Application";
+}
+```
+אם הוא false, אבל אין `appClass` (אף אחד לא הכניס android:name לApplication בManifest), יווצר Application ברירת מחדל.
+אך בגלל שהנוזקה כן קיימה `appClass`, נכריח את `forceDefaultAppClass` להיות true, ומיד יווצר `appClass` חדש ונקי.
+
+**הערה**:
+הגישה הזו של להחזיר אובייקט Application רגיל, עלולה לגרום לדריסה בהמשך הריצה, בגלל בדיקות שהנוזקה עלולה לעשות.
+לכן עדיף היה ליצור אובייקט Application ידני, שמשמר את השלד של הנוזקה/לוכד שגיאות ומשתיקן.
+
+---
+### 📚 מקורות
+
+#### **AOSP Core Internals (The Mechanics of Bootstrapping)**
+
+- **[Instrumentation.java](https://www.google.com/search?q=https://cs.android.com/android/platform/superproject/%2B/android-latest-release:frameworks/base/core/java/android/app/Instrumentation.java)** –
+- **[LoadedApk.java](https://www.google.com/search?q=https://cs.android.com/android/platform/superproject/%2B/android-latest-release:frameworks/base/core/java/android/app/LoadedApk.java)** 
+- **[ActivityThread.java](https://www.google.com/search?q=https://cs.android.com/android/platform/superproject/%2B/android-latest-release:frameworks/base/core/java/android/app/ActivityThread.java)** 
+- **[ZygoteInit.java](https://www.google.com/search?q=https://cs.android.com/android/platform/superproject/%2B/android-latest-release:frameworks/base/core/java/com/android/internal/os/ZygoteInit.java)**
+
+#### **Research Methodology**
+- **[AOSP Source Navigation (cs.android.com)](https://cs.android.com/)**
+#### **Malware Research & Threat Intelligence**
+* [threatfabric.com/blogs](https://www.google.com/search?q=https://threatfabric.com/blogs/anatsa-hits-uk-and-dach-with-new-campaign)
+-  [thehackernews.com](https://thehackernews.com/2025/07/anatsa-android-banking-trojan-hits.html)
+#### **Dynamic Analysis & Instrumentation**
+* [frida.re](https://frida.re/)
+- **Digital Whisper:** גיליון 162, עמוד 5 – מאמרים בעברית על טכניקות Unpacking ו-Reverse Engineering.
